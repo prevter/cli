@@ -28,19 +28,6 @@ jobs:
           prebuild: 'sudo apt-get install gcc-mingw-w64-x86-64'
           target: x86_64-pc-windows-gnu
 
-        - name: "macOS"
-          id: mac
-          os: macos-latest
-          executable: 'geode'
-          prebuild: |
-            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
-            arch -x86_64 brew update
-            arch -x86_64 brew reinstall openssl@3
-            export OPENSSL_STATIC=1
-            export OPENSSL_DIR="$(arch -x86_64 brew --prefix openssl@3)"
-          target: x86_64-apple-darwin
-
         - name: "Linux"
           id: linux
           os: ubuntu-22.04
@@ -92,16 +79,74 @@ jobs:
         name: geode-cli-${{ matrix.config.id }}
         path: ./out/
 
-    - name: Setup tmate session
-      if: ${{ failure() && inputs.debug && matrix.config.id == 'mac' }}
-      uses: mxschmitt/action-tmate@v3
-      with:
-        limit-access-to-actor: true
+  build-macos:
+    name: Build macOS Universal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rosetta
+        run: sudo softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Install x86_64 Homebrew
+        run: |
+          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+      - name: Install x86_64 OpenSSL
+        run: |
+          arch -x86_64 /usr/local/bin/brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Install arm64 OpenSSL
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+
+      - name: Build x86_64
+        run: |
+          export OPENSSL_STATIC=1
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Build aarch64
+        run: |
+          export OPENSSL_STATIC=1
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          cargo build --release --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          mkdir -p ./out
+          lipo -create \
+            target/x86_64-apple-darwin/release/geode \
+            target/aarch64-apple-darwin/release/geode \
+            -output ./out/geode
+          chmod +x ./out/geode
+          lipo -info ./out/geode
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: geode-cli-mac
+          path: ./out/
 
   publish:
     name: Publish
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, build-macos]
     if: github.ref == 'refs/heads/main'
     steps:
     - name: Checkout
